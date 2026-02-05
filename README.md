@@ -103,6 +103,20 @@ IntelliVault/
 * Enabled team collaboration via GitHub
 
 ---
+## 📅 Week-2 Progress
+
+*Implemented backend document ingestion module supporting PDF and TXT files
+*Extracted clean raw text from uploaded documents
+*Implemented text chunking logic with configurable chunk size and overlap
+*Added metadata to each chunk (chunk ID and source document)
+*Tested ingestion and chunking on long academic documents
+*Verified correct generation of multiple chunks for large input
+*Improved UI layout for clarity and usability
+*Developed initial Streamlit frontend UI with:
+      >File upload interface
+      >Question input field
+      >Placeholder sections for answers and sources
+
 
 ## 🚀 Future Work
 
@@ -120,6 +134,7 @@ IntelliVault/
 * **Frontend & Documentation:** Streamlit UI, integration, report preparation, demo
 
 ---
+
 
 
 
