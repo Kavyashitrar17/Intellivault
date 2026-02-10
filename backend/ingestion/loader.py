@@ -35,3 +35,4 @@ def _load_pdf(file_path: str) -> str:
 def _load_txt(file_path: str) -> str:
     with open(file_path, "r", encoding="utf-8") as file:
         return file.read().strip()
+    

@@ -1,4 +1,9 @@
 pypdf
 fastapi
 uvicorn
+sentence-transformers
+faiss-cpu
+numpy
+pypdf
+
 
