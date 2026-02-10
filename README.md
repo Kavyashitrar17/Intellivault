@@ -117,6 +117,17 @@ IntelliVault/
 
 ---
 
+## 📅 Week-3 Progress
+* Generated embeddings for document chunks using a Sentence Transformer model
+* Stored embeddings in a FAISS vector database
+* Implemented semantic similarity search for user queries
+* Converted user questions into embeddings for retrieval
+* Retrieved the most relevant document sections based on meaning
+* Verified correct retrieval of concepts (e.g., deadlock) from test documents
+
+
+---
+
 ## 🚀 Future Work
 
 * Implement document ingestion and chunking
