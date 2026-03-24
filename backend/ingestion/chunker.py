@@ -8,6 +8,9 @@ def chunk_text(
     Splits text into overlapping chunks with source metadata.
     """
 
+    if not text.strip():
+        return []
+
     words = text.split()
     chunks = []
 

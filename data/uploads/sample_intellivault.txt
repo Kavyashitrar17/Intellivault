@@ -1,0 +1,30 @@
+Operating systems act as an interface between the computer hardware and the user. They manage hardware resources such as CPU, memory, and I/O devices, and provide services to application programs. One of the most important responsibilities of an operating system is process management.
+
+A process is a program in execution. It consists of the program code, current activity, program counter, registers, and variables. The operating system is responsible for creating, scheduling, and terminating processes. Process scheduling determines which process gets access to the CPU and for how long.
+
+CPU scheduling is required because at any given time, multiple processes may be ready to execute. Scheduling algorithms decide the order in which processes are executed. Common scheduling algorithms include First Come First Serve (FCFS), Shortest Job First (SJF), Priority Scheduling, and Round Robin Scheduling.
+
+First Come First Serve scheduling is the simplest scheduling algorithm. In this approach, processes are executed in the order in which they arrive. Although FCFS is easy to implement, it can lead to the convoy effect, where short processes wait for long processes to finish.
+
+Shortest Job First scheduling selects the process with the smallest execution time. This algorithm minimizes average waiting time but requires knowledge of the execution time in advance, which is not always possible. Priority scheduling assigns a priority to each process and schedules the process with the highest priority first.
+
+Round Robin scheduling is designed for time-sharing systems. Each process is assigned a fixed time quantum. The CPU cycles through the ready queue, allocating the CPU to each process for a maximum of one time quantum. This ensures fairness and improves response time.
+
+Another critical concept in operating systems is memory management. Memory management involves keeping track of which parts of memory are currently in use and by which process. It also decides which processes should be loaded into memory and when.
+
+Memory can be divided into fixed-size or variable-size partitions. Paging and segmentation are two commonly used memory management techniques. Paging divides memory into fixed-size pages, while segmentation divides memory into logical segments such as code, stack, and data.
+
+Virtual memory is a technique that allows the execution of processes that are not completely loaded into main memory. It uses disk space as an extension of main memory. This allows programs to be larger than physical memory and improves memory utilization.
+
+Deadlock is another important issue in operating systems. A deadlock occurs when a set of processes are blocked because each process is holding a resource and waiting for another resource held by another process. Deadlock can occur only if four conditions hold simultaneously: mutual exclusion, hold and wait, no preemption, and circular wait.
+
+Deadlock prevention ensures that at least one of the necessary conditions for deadlock cannot occur. Deadlock avoidance requires the operating system to have advance information about resource requests. The Banker’s Algorithm is a well-known deadlock avoidance technique.
+
+Deadlock detection involves allowing deadlocks to occur and then detecting and recovering from them. Recovery methods include terminating processes or preempting resources.
+
+File systems are used to control how data is stored and retrieved. The operating system provides a file system interface that allows users to create, delete, read, and write files. Common file allocation methods include contiguous allocation, linked allocation, and indexed allocation.
+
+I/O management is another key function of the operating system. It involves controlling and coordinating the use of I/O devices. Device drivers act as an interface between the operating system and hardware devices.
+
+In summary, the operating system is a critical component of a computer system. It manages hardware resources, provides services to applications, ensures efficient execution, and maintains system stability and security.
+
