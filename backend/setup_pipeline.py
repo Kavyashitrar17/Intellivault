@@ -1,7 +1,7 @@
-from ingestion.loader import load_document
-from ingestion.chunker import chunk_text
-from ingestion.embedder import create_embeddings   
-from retrieval.vector_store import VectorStore
+from backend.ingestion.loader import load_document
+from backend.ingestion.chunker import chunk_text
+from backend.ingestion.embedder import create_embeddings
+from backend.retrieval.vector_store import VectorStore
 
 # 1. Load document
 doc = load_document("sample.txt")
@@ -25,11 +25,8 @@ print("✅ Chunks saved successfully!")
 embeddings = create_embeddings(chunks)
 
 # 4. Create vector store
-vector_store = VectorStore(384)
-vector_store.add_embeddings(embeddings)
-
-# 5. SAVE FAISS (VERY IMPORTANT)
-import faiss
-faiss.write_index(vector_store.index, "data/vector_db/faiss_index.index")
+vector_store = VectorStore()
+vector_store.add(embeddings)
+vector_store.save()
 
 print("✅ Vector DB created successfully!")

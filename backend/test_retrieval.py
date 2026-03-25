@@ -17,6 +17,10 @@ with open("data/processed_chunks/chunks.pkl", "rb") as f:
 query = "What is deadlock?"
 
 query_embedding = model.encode([query]).astype("float32")
+# Match how documents are indexed: normalized vectors.
+norm = np.linalg.norm(query_embedding)
+if norm > 0:
+    query_embedding = query_embedding / norm
 
 # Search
 distances, indices = index.search(query_embedding, k=2)

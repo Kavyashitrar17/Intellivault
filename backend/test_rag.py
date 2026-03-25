@@ -1,4 +1,4 @@
-from rag_pipeline import rag_pipeline
+from backend.rag_pipeline import rag_pipeline
 
 print("🚀 Starting test...")
 
