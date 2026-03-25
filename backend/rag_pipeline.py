@@ -1,185 +1,155 @@
+"""
+rag_pipeline.py
+---------------
+The main brain of IntelliVault. Orchestrates the full RAG pipeline.
+
+FLOW:
+  User query
+    → embed query
+    → FAISS semantic search (vector_store.py)
+    → hybrid re-rank (retriever.py)
+    → extractive answer (qa_chain.py)
+    → formatted response
+
+CHANGES FROM ORIGINAL:
+  - Now uses retriever.py for hybrid retrieval (semantic + keyword)
+    instead of raw FAISS search inline
+  - Uses qa_chain.py for multi-sentence scoring instead of basic word matching
+  - Response includes a "confidence" field so the UI can show relevance
+  - Chunks are loaded ONCE per call, not twice
+  - Handles all edge cases: empty index, no results, low confidence
+"""
+
 import os
-import faiss
 import pickle
 import logging
-import numpy as np
-from sentence_transformers import SentenceTransformer
+from typing import Dict
 
-# -------------------------------------------------------
-# Logging
-# -------------------------------------------------------
+from backend.retrieval.retriever import retrieve
+from backend.llm.qa_chain        import generate_answer
+from backend.retrieval.vector_store import VectorStore
+from backend.utils.prompts       import NO_DOCUMENTS_MSG, NO_RESULTS_MSG
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# -------------------------------------------------------
-# Paths
-# -------------------------------------------------------
-INDEX_PATH  = "data/vector_db/faiss_index.index"
 CHUNKS_PATH = "data/processed_chunks/chunks.pkl"
-DIMENSION   = 384   # all-MiniLM-L6-v2 always outputs 384-dim vectors
 
-# -------------------------------------------------------
-# Load embedding model ONCE — read-only, safe at module level
-# -------------------------------------------------------
-logger.info("Loading SentenceTransformer model...")
-model = SentenceTransformer("all-MiniLM-L6-v2")
-logger.info("Model loaded.")
+def _maybe_sync_faiss_index(chunks: list) -> None:
+    """
+    Ensure FAISS index size matches the number of serialized chunks.
+
+    If they diverge, FAISS can return indices that don't map to chunks.pkl
+    (leading to empty results or guard-triggered skips).
+    """
+    if not chunks:
+        return
+
+    try:
+        store = VectorStore()
+        chunk_count = len(chunks)
+        vec_count = store.total_vectors
+
+        if vec_count == chunk_count:
+            return
+
+        logger.warning(
+            "[Pipeline] FAISS/chunks mismatch detected. "
+            f"FAISS vectors={vec_count} chunks={chunk_count}. Rebuilding FAISS index..."
+        )
+
+        # Rebuild FAISS deterministically from chunks.pkl.
+        # This keeps retrieval index<->chunk mapping correct.
+        from backend.ingestion.embedder import create_embeddings
+
+        embeddings = create_embeddings(chunks)
+        if len(embeddings) == 0:
+            logger.warning("[Pipeline] Rebuild skipped: no embeddings generated.")
+            return
+
+        store.rebuild_from_embeddings(embeddings)
+    except Exception as e:
+        # Retrieval will still have guards, but we prefer correctness.
+        logger.error(f"[Pipeline] Could not sync FAISS index: {e}", exc_info=True)
 
 
-# -------------------------------------------------------
-# Load FAISS index from disk (cold start safe)
-# -------------------------------------------------------
-def load_index():
-    if os.path.exists(INDEX_PATH):
-        logger.info(f"Loading FAISS index from {INDEX_PATH}")
-        return faiss.read_index(INDEX_PATH)
-    else:
-        logger.warning("No FAISS index found — creating empty index.")
-        os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
-        return faiss.IndexFlatL2(DIMENSION)
-
-
-# -------------------------------------------------------
-# Load chunks list from disk (cold start safe)
-# -------------------------------------------------------
-def load_chunks():
-    if os.path.exists(CHUNKS_PATH):
-        with open(CHUNKS_PATH, "rb") as f:
-            chunks = pickle.load(f)
-        logger.info(f"Loaded {len(chunks)} chunks from disk.")
-        return chunks
-    else:
-        logger.warning("No chunks file found — returning empty list.")
+def load_chunks() -> list:
+    """Load chunk list from disk. Returns empty list if file not found."""
+    if not os.path.exists(CHUNKS_PATH):
+        logger.warning("[Pipeline] chunks.pkl not found.")
         return []
+    with open(CHUNKS_PATH, "rb") as f:
+        chunks = pickle.load(f)
+    logger.info(f"[Pipeline] Loaded {len(chunks)} chunks.")
+    return chunks
 
 
-# -------------------------------------------------------
-# Retrieve top-k relevant chunks for a query
-# Returns: (list of chunk texts, list of source filenames)
-# -------------------------------------------------------
-def retrieve(query, k=5):
+def rag_pipeline(query: str) -> Dict:
     """
-    Embeds the query and finds the top-k nearest chunks in FAISS.
-    Also returns the source filename for each chunk so the user
-    can see which document the answer came from.
+    Full RAG pipeline: retrieve → rank → answer.
+
+    Args:
+        query: The user's natural language question.
+
+    Returns:
+        Dict with keys:
+            answer       (str)  — the extracted answer
+            sources      (list) — short previews of the top matching chunks
+            source_files (list) — which documents the answer came from
+            confidence   (str)  — "high" / "medium" / "low" based on top chunk score
     """
-    index  = load_index()
+    logger.info(f"[Pipeline] Query: '{query}'")
+
+    # --- Load chunks ---
     chunks = load_chunks()
 
-    # Cold start — nothing uploaded yet
-    if index.ntotal == 0 or len(chunks) == 0:
-        logger.warning("Index or chunks are empty — nothing to retrieve.")
-        return [], []
+    if not chunks:
+        return {
+            "answer":       NO_DOCUMENTS_MSG,
+            "sources":      [],
+            "source_files": [],
+            "confidence":   "none",
+        }
 
-    # Never ask for more results than exist in the index
-    k = min(k, index.ntotal)
+    # --- Retrieve top relevant chunks (hybrid semantic + keyword) ---
+    _maybe_sync_faiss_index(chunks)
+    top_chunks = retrieve(query, chunks, k=5)
 
-    # Embed the query — FAISS requires float32
-    query_embedding = model.encode([query]).astype("float32")
+    if not top_chunks:
+        return {
+            "answer":       NO_RESULTS_MSG,
+            "sources":      [],
+            "source_files": [],
+            "confidence":   "low",
+        }
 
-    # Search the FAISS index
-    distances, indices = index.search(query_embedding, k)
+    # --- Generate extractive answer ---
+    answer = generate_answer(query, top_chunks)
 
-    logger.info(f"FAISS returned indices: {indices[0]}")
-    logger.info(f"Total chunks available: {len(chunks)}")
-
-    texts   = []
-    sources = []
-
-    for idx in indices[0]:
-        if 0 <= idx < len(chunks):
-            texts.append(chunks[idx]["text"])
-            sources.append(chunks[idx].get("source", "unknown"))
-        else:
-            # Index mismatch guard — skip invalid positions
-            logger.warning(f"Index {idx} out of range — skipping.")
-
-    return texts, sources
-
-
-# -------------------------------------------------------
-# Generate an extractive answer from retrieved chunks
-# -------------------------------------------------------
-def generate_answer(query, retrieved_chunks):
-    """
-    Extractive answer generation — no LLM needed.
-
-    How it works:
-      1. Split each chunk into sentences.
-      2. Score each sentence by how many query words it contains.
-      3. Return the highest-scoring sentence.
-
-    Why not GPT-2?
-      GPT-2 repeats itself and hallucinates.
-      This approach is fast, accurate, and grounded in the document.
-    """
-    if not retrieved_chunks:
-        return "No relevant content found. Please upload a document first."
-
-    # Use a set for fast word lookup
-    query_words = set(query.lower().split())
-
-    best_sentence = ""
-    max_score     = -1
-
-    for chunk in retrieved_chunks:
-        # Split on period or newline to get individual sentences
-        sentences = [s.strip() for s in chunk.replace("\n", ". ").split(".")]
-
-        for sentence in sentences:
-            # Skip tiny meaningless fragments
-            if len(sentence) < 15:
-                continue
-
-            sentence_words = set(sentence.lower().split())
-
-            # Score = number of query words that appear in this sentence
-            score = len(query_words & sentence_words)
-
-            if score > max_score:
-                max_score     = score
-                best_sentence = sentence
-
-    # Fallback: return start of first chunk if nothing matched
-    if not best_sentence:
-        best_sentence = retrieved_chunks[0][:300]
-
-    return best_sentence.strip()
-
-
-# -------------------------------------------------------
-# Main RAG pipeline — called by api.py /query endpoint
-# -------------------------------------------------------
-def rag_pipeline(query):
-    """
-    Full pipeline:
-      1. Retrieve relevant chunks from FAISS
-      2. Generate an extractive answer
-      3. Return clean JSON with answer + source info
-
-    Response format:
-      {
-        "answer":       "...",
-        "sources":      ["first 150 chars...", ...],
-        "source_files": ["lecture1.pdf", ...]
-      }
-    """
-    logger.info(f"Running RAG pipeline for query: '{query}'")
-
-    retrieved_chunks, source_files = retrieve(query)
-    logger.info(f"Retrieved {len(retrieved_chunks)} chunk(s).")
-
-    answer = generate_answer(query, retrieved_chunks)
-    logger.info(f"Answer: {answer[:120]}")
-
-    # Trim sources to first 150 chars so the response stays readable
+    # --- Build response ---
+    source_files   = list(set(c["source"] for c in top_chunks))
     source_previews = [
-        chunk[:150] + "..." if len(chunk) > 150 else chunk
-        for chunk in retrieved_chunks
+        c["text"][:150] + "..." if len(c["text"]) > 150 else c["text"]
+        for c in top_chunks
     ]
+
+    # Confidence based on top chunk's hybrid score
+    top_score = float(top_chunks[0].get("score", 0) or 0)
+    if top_score >= 0.6:
+        confidence = "high"
+    elif top_score >= 0.35:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    logger.info(
+        f"[Pipeline] Done. Confidence={confidence} | "
+        f"Sources={source_files} | Answer: {answer[:80]}"
+    )
 
     return {
         "answer":       answer,
-        "sources":      source_previews,        # short preview of matching chunks
-        "source_files": list(set(source_files)) # which documents were used
+        "sources":      source_previews,
+        "source_files": source_files,
+        "confidence":   confidence,
     }
