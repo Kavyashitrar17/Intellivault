@@ -1,9 +1,22 @@
-pypdf
+# IntelliVault — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Backend
 fastapi
-uvicorn
+uvicorn[standard]
+
+# Frontend
+streamlit
+requests
+
+# Document loading
+pymupdf          # replaces pypdf — better PDF text extraction
+
+# Embeddings
 sentence-transformers
+
+# Vector database
 faiss-cpu
+
+# Scientific computing
 numpy
-pypdf
-
-
