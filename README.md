@@ -1,149 +1,115 @@
-# 🧠 IntelliVault – Personal Knowledge Vault using RAG
+# IntelliVault – Personal Knowledge Vault using RAG
 
-## 📌 Project Overview
+# Project Overview
+IntelliVault is a Personal Knowledge Vault that enables users to store and query their own documents using semantic search and intelligent recall. Instead of relying on keyword-based search, the system allows users to ask natural language questions and receive context-aware answers grounded strictly in their uploaded documents.
+The system is built using a Retrieval-Augmented Generation (RAG) approach, where relevant document content is retrieved first and then used to generate accurate and meaningful answers.
 
-IntelliVault is a **Personal Knowledge Vault** that enables users to store their own documents and retrieve information from them using **semantic search and intelligent recall**.
-Instead of relying on keyword-based search, the system allows users to ask **natural language questions** and receive **context-aware answers grounded strictly in their uploaded documents**.
+# Problem Statement
+Students and professionals store large amounts of information in digital documents such as PDFs and notes. Over time, recalling specific information becomes difficult due to inefficient keyword-based search and lack of contextual understanding. This project addresses this problem by enabling semantic retrieval from personal documents, allowing users to query their knowledge base effectively.
 
-The project is built using a **Retrieval-Augmented Generation (RAG)** approach, where relevant document content is retrieved first and then passed to a Large Language Model (LLM) for reasoning.
+# Solution Approach
+The system follows a Retrieval-Augmented Generation (RAG) architecture:
+Users upload documents (PDF or TXT).
+Documents are processed and split into smaller overlapping chunks.
+Each chunk is converted into vector embeddings using a transformer model.
+Embeddings are stored in a FAISS vector database.
+When a user submits a query:
+The query is converted into an embedding.
+The system retrieves the most relevant chunks using semantic similarity.
+A context-based answer is generated from the retrieved content.
+The system ensures that answers are grounded in the uploaded documents, reducing hallucination and improving reliability.
 
----
+# Key Features
+Support for PDF and TXT document upload
+Automatic text extraction and preprocessing
+Configurable chunking with overlap
+Embedding generation using Sentence Transformers
+Vector storage and similarity search using FAISS
+Semantic retrieval based on meaning rather than keywords
+Context-aware answer generation
+Source-based answer transparency
+REST API using FastAPI
+Interactive frontend using Streamlit
+System Architecture
 
-## 🎯 Problem Statement
+# User
+→ Frontend (Streamlit)
+→ Backend (FastAPI)
+→ Document Processing (Chunking & Embeddings)
+→ Vector Database (FAISS)
+→ Semantic Retrieval
+→ Answer Generation
+→ Response with Sources
 
-Students and professionals store large amounts of information in digital documents such as PDFs and notes. Over time, recalling specific information becomes difficult due to poor keyword-based search and lack of context.
-This project aims to solve this problem by enabling **semantic recall from personal documents**, allowing users to query their own knowledge base intelligently.
+# Tech Stack
+Layer	Technology
+Language	Python
+Backend	FastAPI
+Frontend	Streamlit
+Embeddings	Sentence Transformers (all-MiniLM-L6-v2)
+Vector Database	FAISS
+Document Processing	PyMuPDF / PyPDF
+LLM / QA Logic	Local extractive QA + optional LLM
+Version Control	Git & GitHub
 
----
-
-## 💡 Solution Approach
-
-The system follows a **Retrieval-Augmented Generation (RAG)** architecture:
-
-1. User documents are uploaded and processed.
-2. Documents are split into smaller chunks.
-3. Each chunk is converted into vector embeddings.
-4. Embeddings are stored in a vector database.
-5. When a user asks a question:
-
-   * Relevant chunks are retrieved using semantic similarity.
-   * An LLM generates an answer **only using the retrieved content**.
-
-This ensures **accurate, explainable, and non-hallucinated responses**.
-
----
-
-## 🧩 Key Features (MVP Scope)
-
-* Upload PDF or text documents
-* Chunk and embed documents
-* Store embeddings in a vector database
-* Semantic search based on meaning, not keywords
-* Context-grounded answer generation using LLM
-* Display source document for answers
-
----
-
-## 🏗 System Architecture (High Level)
-
-```
-User
- ↓
-Frontend (Streamlit)
- ↓
-Backend (FastAPI)
- ↓
-Document Chunking & Embeddings
- ↓
-Vector Database (FAISS)
- ↓
-LLM (Answer Generation)
- ↓
-Answer + Source
-```
-
----
-
-## 🛠 Tech Stack (Planned)
-
-| Layer           | Technology                    |
-| --------------- | ----------------------------- |
-| Language        | Python                        |
-| Backend         | FastAPI                       |
-| Frontend        | Streamlit                     |
-| Embeddings      | SentenceTransformers / OpenAI |
-| Vector DB       | FAISS                         |
-| LLM             | GPT / LLaMA (via API)         |
-| Version Control | Git & GitHub                  |
-
----
-
-## 📁 Project Structure
-
-```
+# Project Structure
 IntelliVault/
-├── backend/        # AI & backend logic
-├── frontend/       # Streamlit UI
-├── data/           # Uploaded files & vector DB
-├── docs/           # Diagrams & documentation
-├── README.md
+├── backend/
+│   ├── ingestion/        # Document loading, chunking, embeddings
+│   ├── retrieval/        # FAISS and search logic
+│   ├── llm/              # Answer generation logic
+│   ├── api.py            # FastAPI endpoints
+│   ├── rag_pipeline.py   # End-to-end RAG pipeline
+│
+├── frontend/
+│   ├── app.py            # Streamlit UI
+│
+├── data/
+│   ├── uploads/          # Uploaded files
+│   ├── processed_chunks/ # Stored chunk data
+│   ├── vector_db/        # FAISS index
+│
 ├── requirements.txt
+├── README.md
 └── .gitignore
-```
 
----
+# How It Works
+A user uploads a document through the frontend.
+The backend extracts text and splits it into chunks with overlap.
+Each chunk is converted into embeddings using a transformer model.
+Embeddings are stored in a FAISS vector database.
+When a query is asked:
+The query is converted into an embedding.
+The system retrieves the most relevant chunks using similarity search.
+Relevant sentences are selected and combined to generate a concise answer.
+The system returns the answer along with the source chunks.
 
-## 📅 Week-1 Progress
+# Improvements Implemented
+Fixed embedding and query normalization for better retrieval accuracy
+Improved FAISS indexing and consistency between chunks and vectors
+Enhanced retrieval ranking to return more relevant context
+Refined answer generation to reduce repetition and improve clarity
+Added error handling and stability improvements in API
+Ensured compatibility between backend modules and consistent imports
+Future Improvements
+Integration of advanced LLMs for generative answers
+Hybrid search combining keyword and semantic retrieval
+Multi-document querying and filtering
+Better UI/UX enhancements
 
-* Finalized project idea and scope (MVP)
-* Designed system architecture
-* Created GitHub repository
-* Implemented clean folder structure
-* Added initial Streamlit frontend (UI skeleton)
-* Enabled team collaboration via GitHub
+# Team Roles
+Backend & AI Logic:
+Document processing, embeddings, vector database, retrieval, RAG pipeline
+Frontend & Documentation:
+Streamlit UI, API integration, report preparation, demonstration
 
----
-
-## 📅 Week-2 Progress
-
-* Implemented backend document ingestion module supporting PDF and TXT files
-* Extracted clean raw text from uploaded documents
-* Implemented text chunking logic with configurable chunk size and overlap
-* Added metadata to each chunk (chunk ID and source document)
-* Tested ingestion and chunking on long academic documents
-* Verified correct generation of multiple chunks for large inputs
-* Improved UI layout for clarity and usability
-* Developed initial Streamlit frontend UI with file upload and question input placeholders
-
----
-
-## 📅 Week-3 Progress
-* Generated embeddings for document chunks using a Sentence Transformer model
-* Stored embeddings in a FAISS vector database
-* Implemented semantic similarity search for user queries
-* Converted user questions into embeddings for retrieval
-* Retrieved the most relevant document sections based on meaning
-* Verified correct retrieval of concepts (e.g., deadlock) from test documents
+Authors
+Kavyashi Trar
+Prakrit
 
 
----
 
-## 🚀 Future Work
 
-* Implement document ingestion and chunking
-* Generate and store embeddings
-* Build semantic retrieval pipeline
-* Integrate LLM for answer generation
-* Improve UI and add error handling
-
----
-
-## 👥 Team Roles
-
-* **Backend & AI Logic:** Document processing, embeddings, vector search, RAG pipeline
-* **Frontend & Documentation:** Streamlit UI, integration, report preparation, demo
-
----
 
 
 
