@@ -27,6 +27,14 @@ DEFAULT_DIMENSION = 384   # all-MiniLM-L6-v2 outputs 384-dim vectors
 INDEX_PATH = "data/vector_db/faiss_index.index"
 
 
+def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
+    """L2-normalize vectors row-wise (safe for zero vectors)."""
+    vectors = np.asarray(vectors, dtype="float32")
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    return vectors / norms
+
+
 class VectorStore:
     """
     Wraps a FAISS index with save/load and search functionality.
@@ -86,6 +94,9 @@ class VectorStore:
                 f"Expected embeddings dimension {self.dimension}, got {embeddings.shape[1]}"
             )
 
+        # Defensive normalization keeps cosine behavior correct even if
+        # upstream ingestion changes and sends non-normalized vectors.
+        embeddings = _l2_normalize(embeddings)
         self.index.add(embeddings)
         logger.info(
             f"[VectorStore] Added {len(embeddings)} vectors. "
@@ -119,6 +130,9 @@ class VectorStore:
             raise ValueError(
                 f"Query embedding dimension mismatch: expected {self.dimension}, got {query_embedding.shape[1]}"
             )
+
+        # Defensive normalization: with IndexFlatIP this makes scores cosine similarities.
+        query_embedding = _l2_normalize(query_embedding)
 
         k = min(int(k), self.index.ntotal)
         scores, indices = self.index.search(query_embedding, k)
@@ -157,6 +171,8 @@ class VectorStore:
         embeddings = embeddings.astype("float32", copy=False)
         if embeddings.ndim != 2:
             raise ValueError(f"Expected embeddings with shape (n, d), got {embeddings.shape}")
+
+        embeddings = _l2_normalize(embeddings)
 
         self.dimension = int(embeddings.shape[1])
         self.index = faiss.IndexFlatIP(self.dimension)

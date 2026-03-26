@@ -30,6 +30,19 @@ from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
+# Common English stopwords for extracting key query terms.
+# Intentionally small to avoid over-filtering domain queries.
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by",
+    "can", "could", "did", "do", "does", "doing", "for", "from", "had", "has",
+    "have", "having", "how", "i", "if", "in", "into", "is", "it", "its", "may",
+    "might", "more", "most", "must", "no", "not", "of", "on", "or", "our", "out",
+    "should", "so", "such", "than", "that", "the", "their", "then", "there",
+    "these", "they", "this", "those", "to", "was", "we", "were", "what", "when",
+    "where", "which", "who", "whom", "why", "will", "with", "would", "you",
+    "your",
+}
+
 # Controls how many sentences to include in the answer
 TOP_SENTENCES = 2
 
@@ -53,6 +66,7 @@ def generate_answer(query: str, chunks: List[Dict]) -> str:
         return "No relevant content found. Please upload a document first."
 
     query_tokens = set(_tokenize(query))
+    key_query_terms = _key_terms(query)
 
     # (score, sentence, chunk_rank, sentence_pos)
     all_scored_sentences = []
@@ -68,6 +82,11 @@ def generate_answer(query: str, chunks: List[Dict]) -> str:
             if len(sentence) < MIN_SENTENCE_LENGTH:
                 continue
 
+            # Ignore sentences that are not related to the query:
+            # require at least one key query term to appear.
+            if key_query_terms and not (set(_tokenize(sentence)) & key_query_terms):
+                continue
+
             score = _score_sentence(
                 sentence=sentence,
                 query_tokens=query_tokens,
@@ -79,10 +98,8 @@ def generate_answer(query: str, chunks: List[Dict]) -> str:
             all_scored_sentences.append((score, sentence, chunk_rank, sent_pos))
 
     if not all_scored_sentences:
-        # Fallback: return beginning of the best-ranked chunk
-        logger.warning("[QA] No scoreable sentences found. Using chunk fallback.")
-        fallback_text = chunks[0].get("text", "")
-        return fallback_text[:300].strip() + "..." if fallback_text else "No relevant content found."
+        logger.info("[QA] No query-related sentences found.")
+        return "Answer not found in documents"
 
     # Sort by score descending
     all_scored_sentences.sort(key=lambda x: x[0], reverse=True)
@@ -90,10 +107,17 @@ def generate_answer(query: str, chunks: List[Dict]) -> str:
     # Pick top N unique sentences (avoid near-duplicates)
     selected_items = []  # (sentence, chunk_rank, sentence_pos)
     selected_texts = []
+    best_score = all_scored_sentences[0][0] if all_scored_sentences else 0.0
+    # If the best sentence is weakly related, don't guess.
+    # With our scoring (overlap + position + length - rank), strong matches are typically >= 0.55.
+    if best_score < 0.55:
+        logger.info(f"[QA] Best score too low ({best_score:.3f}).")
+        return "Answer not found in documents"
+
     for score, sentence, chunk_rank, sent_pos in all_scored_sentences:
         if len(selected_items) >= TOP_SENTENCES:
             break
-        if not _is_duplicate(sentence, selected_texts):
+        if not _is_duplicate(sentence, selected_texts) and not _is_exact_duplicate(sentence, selected_texts):
             selected_items.append((sentence, chunk_rank, sent_pos))
             selected_texts.append(sentence)
             logger.debug(f"[QA] Selected (score={score:.3f}): {sentence[:80]}")
@@ -128,7 +152,17 @@ def _split_sentences(text: str) -> List[str]:
 
 def _tokenize(text: str) -> List[str]:
     """Lowercase word tokens, no punctuation."""
-    return re.findall(r'\b[a-z]+\b', text.lower())
+    # Include digits to better match IDs/years/versions in queries.
+    return re.findall(r"\b[a-z0-9]+\b", text.lower())
+
+
+def _key_terms(query: str) -> set:
+    """
+    Extract key query terms for strong matching.
+    Drops stopwords and 1–2 character tokens to avoid noise.
+    """
+    tokens = _tokenize(query)
+    return {t for t in tokens if len(t) >= 3 and t not in _STOPWORDS}
 
 
 def _score_sentence(
@@ -166,6 +200,14 @@ def _score_sentence(
         matched = query_tokens & sentence_tokens
         keyword_score = len(matched) / len(query_tokens)
 
+    # Strongly prioritize key query terms (non-stopwords).
+    key_terms = {t for t in query_tokens if len(t) >= 3 and t not in _STOPWORDS}
+    if key_terms:
+        key_hits = len(key_terms & sentence_tokens)
+        key_ratio = key_hits / len(key_terms)
+    else:
+        key_ratio = 0.0
+
     # 2. Position bonus — earlier sentences score slightly higher
     if total_sentences > 0:
         position_bonus = 0.2 * (1 - position / total_sentences)
@@ -184,7 +226,8 @@ def _score_sentence(
     # 4. Chunk rank penalty — best chunk = no penalty, 2nd = small discount, etc.
     rank_penalty = 0.05 * chunk_rank
 
-    final = keyword_score + position_bonus + length_bonus - rank_penalty
+    # Weighted blend: key term coverage dominates; position only breaks ties.
+    final = (0.7 * key_ratio) + (0.3 * keyword_score) + position_bonus + length_bonus - rank_penalty
     return max(final, 0.0)
 
 
@@ -202,5 +245,22 @@ def _is_duplicate(candidate: str, selected: List[str], threshold: float = 0.6) -
             continue
         jaccard = len(cand_tokens & existing_tokens) / len(union)
         if jaccard >= threshold:
+            return True
+    return False
+
+
+def _normalize_sentence(s: str) -> str:
+    s = re.sub(r"\s+", " ", s.strip().lower())
+    # Remove most punctuation for robust exact-dup detection.
+    s = re.sub(r"[^a-z0-9 ]+", "", s)
+    return s
+
+
+def _is_exact_duplicate(candidate: str, selected: List[str]) -> bool:
+    cand_norm = _normalize_sentence(candidate)
+    if not cand_norm:
+        return True
+    for existing in selected:
+        if cand_norm == _normalize_sentence(existing):
             return True
     return False
