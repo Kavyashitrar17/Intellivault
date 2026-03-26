@@ -153,8 +153,8 @@ Streamlit UI, API integration, report preparation, demonstration
 
 ## Authors
 
-Kavyashi Trar
-Prakrit
+* Kavyashi Trar
+* Prakrit Mishra
 
 ---
 
