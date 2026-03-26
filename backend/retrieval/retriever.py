@@ -36,12 +36,26 @@ logger = logging.getLogger(__name__)
 SEMANTIC_WEIGHT = 0.7
 KEYWORD_WEIGHT  = 1.0 - SEMANTIC_WEIGHT
 
-# Minimum semantic score to even consider a chunk.
-# Cosine similarity ranges -1 to 1; below 0.2 is usually noise.
-MIN_SCORE_THRESHOLD = 0.20
+# Minimum semantic score to consider a chunk (cosine scale: -1..1).
+MIN_SEMANTIC_THRESHOLD = 0.25
+
+# Minimum final hybrid score to keep in returned results.
+MIN_FINAL_SCORE = 0.15
+
+# Enforce concise result sets for downstream QA quality.
+DEFAULT_TOP_K = 5
+MAX_TOP_K = 5
+
+# For weak semantic matches, require at least some keyword overlap.
+LOW_SEMANTIC_KEYWORD_GUARD = 0.35
+LOW_SEMANTIC_MIN_KEYWORD = 0.10
+
+# Keep only candidates that are not too far from the best semantic hit.
+# This prevents weak tail results from entering QA when fetch_k > k.
+MIN_RELATIVE_TO_BEST_SEMANTIC = 0.70
 
 
-def retrieve(query: str, chunks: List[Dict], k: int = 5) -> List[Dict]:
+def retrieve(query: str, chunks: List[Dict], k: int = DEFAULT_TOP_K) -> List[Dict]:
     """
     Retrieve and re-rank the top-k most relevant chunks for a query.
 
@@ -60,6 +74,7 @@ def retrieve(query: str, chunks: List[Dict], k: int = 5) -> List[Dict]:
 
     if k <= 0:
         return []
+    k = min(k, MAX_TOP_K)
 
     # --- Step 1: Semantic search via FAISS ---
     store = VectorStore()
@@ -94,15 +109,25 @@ def retrieve(query: str, chunks: List[Dict], k: int = 5) -> List[Dict]:
             )
             continue
 
+        sem_score = float(np.clip(sem_score, -1.0, 1.0))
         seen.add(idx)
-        candidates_all.append((idx, float(sem_score)))
-        if sem_score >= MIN_SCORE_THRESHOLD:
-            candidates_thresholded.append((idx, float(sem_score)))
+        candidates_all.append((idx, sem_score))
+        if sem_score >= MIN_SEMANTIC_THRESHOLD:
+            candidates_thresholded.append((idx, sem_score))
 
     # If thresholding wipes everything out, fall back to semantic top candidates.
     candidates = candidates_thresholded if candidates_thresholded else candidates_all
     if not candidates:
         logger.warning("[Retriever] No valid candidates after FAISS filtering.")
+        return []
+
+    # Secondary semantic gate: keep scores reasonably close to the best hit.
+    # This improves precision by dropping weak tail chunks.
+    best_semantic = max(score for _, score in candidates)
+    relative_floor = max(MIN_SEMANTIC_THRESHOLD, best_semantic * MIN_RELATIVE_TO_BEST_SEMANTIC)
+    candidates = [(idx, score) for idx, score in candidates if score >= relative_floor]
+    if not candidates:
+        logger.warning("[Retriever] No candidates passed relative semantic filter.")
         return []
 
     # --- Step 3: Keyword scoring ---
@@ -115,12 +140,23 @@ def retrieve(query: str, chunks: List[Dict], k: int = 5) -> List[Dict]:
         if not chunk_text:
             continue
 
+        # IndexFlatIP + normalized vectors => cosine similarity.
         kw_score = _keyword_score(query_tokens, chunk_text)
+
+        # Semantic-relatedness guard: if semantic signal is weak, keep only chunks
+        # with at least minimal lexical support from the query terms.
+        if sem_score < LOW_SEMANTIC_KEYWORD_GUARD and kw_score < LOW_SEMANTIC_MIN_KEYWORD:
+            continue
+
         final = SEMANTIC_WEIGHT * sem_score + KEYWORD_WEIGHT * kw_score
+        if final < MIN_FINAL_SCORE:
+            continue
 
         scored_chunks.append({
             **chunk,
             "score": round(float(final), 4),
+            "semantic_score": round(sem_score, 4),
+            "keyword_score": round(float(kw_score), 4),
         })
 
     if not scored_chunks:
