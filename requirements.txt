@@ -1,22 +1,62 @@
-# IntelliVault — Python dependencies
-# Install with: pip install -r requirements.txt
+# IntelliVault — requirements.txt
+# Install: pip install -r requirements.txt
 
-# Backend
-fastapi
-uvicorn[standard]
+# -------------------------------------------------------
+# Core framework
+# -------------------------------------------------------
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
 
-# Frontend
-streamlit
-requests
+# -------------------------------------------------------
+# Async & utilities
+# -------------------------------------------------------
+aiofiles>=23.0.0           # async file I/O (used in api.py upload)
+pydantic>=2.0.0
+pydantic-settings>=2.0.0   # settings from .env (config.py)
+python-dotenv>=1.0.0
 
-# Document loading
-pymupdf          # replaces pypdf — better PDF text extraction
+# -------------------------------------------------------
+# Ingestion
+# -------------------------------------------------------
+pymupdf>=1.24.0            # PDF parsing (fitz)
 
+# -------------------------------------------------------
 # Embeddings
-sentence-transformers
+# -------------------------------------------------------
+sentence-transformers>=2.7.0
+numpy>=1.26.0
 
-# Vector database
-faiss-cpu
+# -------------------------------------------------------
+# Vector DB
+# -------------------------------------------------------
+faiss-cpu>=1.8.0           # use faiss-gpu if you have a GPU
 
-# Scientific computing
-numpy
+# -------------------------------------------------------
+# LLM — local (free, no API key needed)
+# -------------------------------------------------------
+transformers>=4.40.0       # Flan-T5
+accelerate>=0.29.0         # faster transformer inference
+sentencepiece>=0.2.0       # Flan-T5 tokenizer
+
+# -------------------------------------------------------
+# Optional: sentence-aware chunking
+# -------------------------------------------------------
+nltk>=3.8.0
+
+# -------------------------------------------------------
+# Optional: cloud LLM (uncomment if needed)
+# -------------------------------------------------------
+# openai>=1.30.0           # for LLM_PROVIDER=openai
+# groq>=0.9.0              # for LLM_PROVIDER=groq (free tier available)
+
+# -------------------------------------------------------
+# Frontend
+# -------------------------------------------------------
+streamlit>=1.35.0
+requests>=2.31.0
+
+# -------------------------------------------------------
+# Development / testing
+# -------------------------------------------------------
+pytest>=8.0.0
+httpx>=0.27.0              # async test client for FastAPI

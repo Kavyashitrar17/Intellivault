@@ -1,94 +1,116 @@
 """
 chunker.py
 ----------
-Splits a document's text into smaller overlapping chunks.
+IMPROVEMENTS OVER ORIGINAL:
+  1. Sentence-aware chunking — chunks now always end at a sentence boundary.
+     Original split on raw word count, so answers could be cut mid-sentence.
+     Now we split into sentences first, then group them into word-count windows.
+  2. Falls back gracefully if nltk is not installed (uses regex splitting).
+  3. All constants come from config.py.
+  4. Same metadata format as before — drop-in replacement.
 
-WHY CHUNKING?
-  LLMs and FAISS work best on short, focused pieces of text.
-  We can't embed an entire 50-page PDF as one vector.
-
-WHY OVERLAP?
-  If an answer spans two adjacent chunks, overlap ensures it
-  appears fully in at least one chunk.
-
-CHANGES FROM ORIGINAL:
-- Added MIN_WORDS filter: drops tiny/noisy chunks (e.g. headers, page numbers)
-- Chunk IDs now include the source name: "notes_0", "notes_1" — easier to debug
-- Added logging so you can see how many chunks each file produces
-- Added a clean docstring explaining every parameter
+Install for best results:  pip install nltk
+Then run once:             python -m nltk.downloader punkt
 """
 
 import logging
+import re
 from typing import List, Dict
+
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-# --- Tunable constants ---
-DEFAULT_CHUNK_SIZE    = 400   # words per chunk (not characters)
-DEFAULT_OVERLAP       = 50    # words shared between adjacent chunks
-MIN_WORDS_PER_CHUNK   = 20    # chunks shorter than this are likely noise
+# Try to use nltk for proper sentence tokenization
+try:
+    import nltk
+    nltk.data.find("tokenizers/punkt")
+    _USE_NLTK = True
+except (ImportError, LookupError):
+    _USE_NLTK = False
+    logger.info(
+        "[Chunker] nltk punkt not available — using regex sentence splitter. "
+        "For better chunking: pip install nltk && python -m nltk.downloader punkt"
+    )
+
+
+def _split_sentences(text: str) -> List[str]:
+    """Split text into individual sentences."""
+    if _USE_NLTK:
+        from nltk.tokenize import sent_tokenize
+        return [s.strip() for s in sent_tokenize(text) if s.strip()]
+    # Regex fallback: split on ". ", "? ", "! ", or newlines
+    raw = re.split(r'(?<=[.!?])\s+|\n+', text)
+    return [s.strip() for s in raw if s.strip()]
 
 
 def chunk_text(
     text: str,
     source: str,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    overlap: int = DEFAULT_OVERLAP,
+    chunk_size: int = None,
+    overlap: int = None,
 ) -> List[Dict]:
     """
-    Split text into overlapping word-based chunks with metadata.
+    Split text into overlapping, sentence-boundary-respecting chunks.
 
     Args:
-        text:       Raw document text (from loader.py).
-        source:     Filename of the document (e.g. "lecture1.pdf").
-        chunk_size: How many words per chunk.
-        overlap:    How many words the next chunk re-uses from the previous one.
-                    This prevents answers from being cut off at chunk boundaries.
+        text:       Raw document text.
+        source:     Filename (e.g. "lecture1.pdf").
+        chunk_size: Target words per chunk (default from config).
+        overlap:    Overlap words between adjacent chunks (default from config).
 
     Returns:
-        List of dicts. Each dict looks like:
-            {
-                "chunk_id": "lecture1_0",
-                "source":   "lecture1.pdf",
-                "text":     "Operating systems manage hardware..."
-            }
+        List of chunk dicts: {chunk_id, source, text}
     """
+    chunk_size = chunk_size or settings.CHUNK_SIZE
+    overlap    = overlap    or settings.CHUNK_OVERLAP
+
     if not text.strip():
-        logger.warning(f"[Chunker] Empty text received for '{source}'. Skipping.")
+        logger.warning(f"[Chunker] Empty text for '{source}'.")
         return []
 
-    words = text.split()
-    chunks = []
-    start = 0
-    chunk_index = 0
+    sentences     = _split_sentences(text)
+    base_name     = source.replace(" ", "_").rsplit(".", 1)[0]
+    chunks        = []
+    chunk_index   = 0
+    current_words = []   # words in the current chunk
+    current_sents = []   # sentences in the current chunk (for overlap)
 
-    # A safe base name for chunk IDs (removes extension and spaces)
-    base_name = source.replace(" ", "_").rsplit(".", 1)[0]
+    for sentence in sentences:
+        words = sentence.split()
+        if not words:
+            continue
 
-    while start < len(words):
-        end = min(start + chunk_size, len(words))
-        chunk_words = words[start:end]
+        # If adding this sentence would overflow the chunk, flush first
+        if current_words and len(current_words) + len(words) > chunk_size:
+            chunk_text_str = " ".join(current_words)
+            if len(current_words) >= settings.MIN_CHUNK_WORDS:
+                chunks.append({
+                    "chunk_id": f"{base_name}_{chunk_index}",
+                    "source":   source,
+                    "text":     chunk_text_str,
+                })
+                chunk_index += 1
 
-        # Skip chunks that are too short — likely headers, page numbers, noise
-        if len(chunk_words) >= MIN_WORDS_PER_CHUNK:
-            chunks.append({
-                "chunk_id": f"{base_name}_{chunk_index}",
-                "source":   source,
-                "text":     " ".join(chunk_words),
-            })
-            chunk_index += 1
-        else:
-            logger.debug(
-                f"[Chunker] Skipped short chunk at word {start} "
-                f"(only {len(chunk_words)} words)"
-            )
+            # Carry over the last `overlap` words as context for the next chunk
+            overlap_text = " ".join(current_words[-overlap:]) if overlap else ""
+            current_words = overlap_text.split() if overlap_text else []
+            current_sents = []
 
-        # Advance by (chunk_size - overlap) to create the sliding window
-        step = chunk_size - overlap
-        start += max(step, 1)  # prevent infinite loop if overlap >= chunk_size
+        current_words.extend(words)
+        current_sents.append(sentence)
+
+    # Flush the last chunk
+    if len(current_words) >= settings.MIN_CHUNK_WORDS:
+        chunks.append({
+            "chunk_id": f"{base_name}_{chunk_index}",
+            "source":   source,
+            "text":     " ".join(current_words),
+        })
 
     logger.info(
         f"[Chunker] '{source}' → {len(chunks)} chunks "
-        f"(size={chunk_size} words, overlap={overlap} words)"
+        f"(size≈{chunk_size} words, overlap={overlap} words, "
+        f"sentence-aware={'yes' if _USE_NLTK else 'regex'})"
     )
     return chunks

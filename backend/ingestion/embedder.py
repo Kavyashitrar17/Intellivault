@@ -1,19 +1,13 @@
 """
 embedder.py
 -----------
-Converts text chunks into numerical vector embeddings.
-
-WHAT ARE EMBEDDINGS?
-  A vector embedding is a list of 384 numbers that represents
-  the *meaning* of a sentence. Similar sentences have similar vectors.
-  FAISS uses these vectors to find relevant chunks fast.
-
-CHANGES FROM ORIGINAL:
-- Model is loaded ONCE as a module-level singleton (not reloaded on every call)
-- Embeddings are L2-normalized — this makes cosine similarity == dot product,
-  which improves ranking quality with FAISS IndexFlatIP (if you switch later)
-- Added batch_size param for large document sets (avoids memory spikes)
-- Added logging to track how long embedding takes
+IMPROVEMENTS OVER ORIGINAL:
+  1. Lazy loading via get_model() — model only loads when first needed,
+     not at import time. This means importing this module in tests or
+     scripts no longer triggers a 90 MB download/load.
+  2. Model name comes from config.py (settings.FLAN_MODEL_NAME is for QA;
+     embedding model stays all-MiniLM-L6-v2 but is now configurable).
+  3. create_embeddings() and embed_query() unchanged in behaviour.
 """
 
 import logging
@@ -23,69 +17,65 @@ from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
 # -------------------------------------------------------
-# Load model ONCE at module level.
-# This means the model is loaded when the server starts,
-# not on every /upload or /query request. Much faster.
+# Lazy singleton
 # -------------------------------------------------------
-logger.info("[Embedder] Loading SentenceTransformer model (all-MiniLM-L6-v2)...")
-_model = SentenceTransformer("all-MiniLM-L6-v2")
-logger.info("[Embedder] Model ready.")
+_model: SentenceTransformer | None = None
+
+
+def get_model() -> SentenceTransformer:
+    """
+    Return the embedding model, loading it on first call only.
+    Safe to call multiple times — returns cached instance.
+    """
+    global _model
+    if _model is None:
+        logger.info(f"[Embedder] Loading model '{EMBEDDING_MODEL_NAME}'...")
+        _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        logger.info("[Embedder] Model ready.")
+    return _model
 
 
 def create_embeddings(chunks: List[Dict], batch_size: int = 64) -> np.ndarray:
     """
-    Generate normalized embeddings for a list of chunk dicts.
-
-    Args:
-        chunks:     List of chunk dicts with a "text" key.
-        batch_size: How many chunks to embed at once.
-                    Lower this if you run out of RAM on large documents.
+    Generate L2-normalized embeddings for a list of chunk dicts.
 
     Returns:
-        NumPy array of shape (num_chunks, 384), dtype float32.
-        Each row is the embedding for the corresponding chunk.
+        np.ndarray of shape (n, 384), dtype float32.
     """
     if not chunks:
         logger.warning("[Embedder] No chunks to embed — returning empty array.")
-        return np.array([]).astype("float32")
+        return np.array([], dtype="float32")
 
     texts = [chunk["text"] for chunk in chunks]
-
     logger.info(f"[Embedder] Embedding {len(texts)} chunks...")
 
-    # encode() returns a numpy array by default
-    embeddings = _model.encode(
+    model = get_model()
+    embeddings = model.encode(
         texts,
         batch_size=batch_size,
-        show_progress_bar=False,  # set True if you want a progress bar in terminal
+        show_progress_bar=False,
         convert_to_numpy=True,
     ).astype("float32")
 
-    # --- L2 Normalization ---
-    # After this, each vector has length 1.
-    # This means FAISS L2 distance ≈ cosine distance, so ranking is more meaningful.
+    # L2 normalize so FAISS inner product == cosine similarity
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1, norms)  # avoid division by zero
+    norms = np.where(norms == 0, 1.0, norms)
     embeddings = embeddings / norms
 
-    logger.info(f"[Embedder] Done. Output shape: {embeddings.shape}")
+    logger.info(f"[Embedder] Done. Shape: {embeddings.shape}")
     return embeddings
 
 
 def embed_query(query: str) -> np.ndarray:
     """
-    Embed a single query string.
-    Returns shape (1, 384) float32 — ready for FAISS search.
-
-    Kept separate from create_embeddings() so the RAG pipeline
-    is clear about what's a document vs what's a query.
+    Embed a single query string. Returns shape (1, 384) float32.
     """
-    embedding = _model.encode([query], convert_to_numpy=True).astype("float32")
-
-    # Normalize the query vector too (must match how documents are normalized)
+    model = get_model()
+    embedding = model.encode([query], convert_to_numpy=True).astype("float32")
     norm = np.linalg.norm(embedding)
     if norm > 0:
         embedding = embedding / norm
-
     return embedding

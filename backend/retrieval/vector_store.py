@@ -1,19 +1,15 @@
 """
 vector_store.py
 ---------------
-Thin wrapper around a FAISS index.
+FAISS index wrapper with a module-level singleton.
 
-WHY A WRAPPER?
-  It keeps FAISS details in one place. If you switch from FAISS to
-  another vector DB later, only this file needs to change.
-
-CHANGES FROM ORIGINAL:
-- Switched from IndexFlatL2 → IndexFlatIP (Inner Product).
-  With normalized embeddings (from embedder.py), inner product == cosine similarity.
-  Cosine similarity ranks semantic matches better than raw L2 distance.
-- Added save() and load() methods — used by api.py
-- Added a scores_and_indices() method that returns BOTH distances and indices
-  so the caller can filter by confidence score
+IMPROVEMENTS OVER ORIGINAL:
+  1. Singleton via get_vector_store() — the index is loaded from disk ONCE
+     per process. Every subsequent call returns the same object.
+     Before: every VectorStore() call re-read the .index file from disk.
+     After:  one disk read at startup, zero disk reads per query.
+  2. reset_vector_store() for /reset endpoint to clear the singleton.
+  3. No logic changes to FAISS operations — those were already correct.
 """
 
 import os
@@ -21,164 +17,133 @@ import logging
 import numpy as np
 import faiss
 
+from backend.config import settings
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_DIMENSION = 384   # all-MiniLM-L6-v2 outputs 384-dim vectors
-INDEX_PATH = "data/vector_db/faiss_index.index"
+DEFAULT_DIMENSION = 384  # all-MiniLM-L6-v2
+
+# -------------------------------------------------------
+# Module-level singleton
+# -------------------------------------------------------
+_store_instance: "VectorStore | None" = None
 
 
+def get_vector_store() -> "VectorStore":
+    """
+    Return the shared VectorStore instance, creating it on first call.
+    Subsequent calls return the same object — no disk read.
+    """
+    global _store_instance
+    if _store_instance is None:
+        _store_instance = VectorStore()
+    return _store_instance
+
+
+def reset_vector_store():
+    """Discard the singleton (used by /reset endpoint)."""
+    global _store_instance
+    _store_instance = None
+    logger.info("[VectorStore] Singleton cleared.")
+
+
+# -------------------------------------------------------
+# Helpers
+# -------------------------------------------------------
 def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
-    """L2-normalize vectors row-wise (safe for zero vectors)."""
     vectors = np.asarray(vectors, dtype="float32")
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1.0, norms)
     return vectors / norms
 
 
+# -------------------------------------------------------
+# VectorStore class
+# -------------------------------------------------------
 class VectorStore:
     """
-    Wraps a FAISS index with save/load and search functionality.
+    Thin wrapper around a FAISS IndexFlatIP index.
 
-    Usage:
-        store = VectorStore()
-        store.add(embeddings_np)
-        indices, scores = store.search(query_embedding, k=5)
-        store.save()
+    Use get_vector_store() instead of instantiating directly.
     """
 
-    def __init__(self, index_path: str = INDEX_PATH, dimension: int = DEFAULT_DIMENSION):
-        # Backwards-compat:
-        # Some scripts used `VectorStore(384)` (where 384 was intended as dimension).
-        # If the first positional argument is an int, treat it as `dimension`.
-        if isinstance(index_path, (int, np.integer)) and dimension == DEFAULT_DIMENSION:
-            dimension = int(index_path)
-            index_path = INDEX_PATH
+    def __init__(self,
+                 index_path: str = None,
+                 dimension: int = DEFAULT_DIMENSION):
+        # Backwards-compat: VectorStore(384) treated as dimension
+        if isinstance(index_path, (int, np.integer)):
+            dimension  = int(index_path)
+            index_path = None
 
-        self.index_path = index_path
-        self.dimension = int(dimension)
-        self.index = self._load_or_create()
+        self.index_path = index_path or settings.INDEX_PATH
+        self.dimension  = int(dimension)
+        self.index      = self._load_or_create()
 
     def _load_or_create(self) -> faiss.Index:
-        """Load index from disk if it exists, otherwise create a fresh one."""
         if os.path.exists(self.index_path):
             index = faiss.read_index(self.index_path)
             logger.info(
-                f"[VectorStore] Loaded index from {self.index_path} "
-                f"({index.ntotal} vectors)"
+                f"[VectorStore] Loaded {self.index_path} ({index.ntotal} vectors)"
             )
             return index
-        else:
-            logger.warning(
-                "[VectorStore] No index found — creating new IndexFlatIP."
-            )
-            os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
-            # IndexFlatIP = brute-force inner product (cosine with normalized vecs)
-            return faiss.IndexFlatIP(self.dimension)
+        logger.warning("[VectorStore] No index found — creating new IndexFlatIP.")
+        os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
+        return faiss.IndexFlatIP(self.dimension)
 
     def add(self, embeddings: np.ndarray):
-        """
-        Add embeddings to the index.
-        embeddings must be shape (n, dimension) and float32.
-        """
         if embeddings is None or len(embeddings) == 0:
-            logger.warning("[VectorStore] No embeddings provided to add(). Skipping.")
+            logger.warning("[VectorStore] add() called with empty embeddings.")
             return
-
-        embeddings = np.asarray(embeddings)
-        embeddings = embeddings.astype("float32", copy=False)
-
+        embeddings = np.asarray(embeddings, dtype="float32")
         if embeddings.ndim != 2:
-            raise ValueError(f"Expected embeddings with shape (n, {self.dimension}), got {embeddings.shape}")
+            raise ValueError(f"Expected (n, {self.dimension}), got {embeddings.shape}")
         if embeddings.shape[1] != self.dimension:
-            raise ValueError(
-                f"Expected embeddings dimension {self.dimension}, got {embeddings.shape[1]}"
-            )
-
-        # Defensive normalization keeps cosine behavior correct even if
-        # upstream ingestion changes and sends non-normalized vectors.
+            raise ValueError(f"Dimension mismatch: expected {self.dimension}, got {embeddings.shape[1]}")
         embeddings = _l2_normalize(embeddings)
         self.index.add(embeddings)
-        logger.info(
-            f"[VectorStore] Added {len(embeddings)} vectors. "
-            f"Total: {self.index.ntotal}"
-        )
+        logger.info(f"[VectorStore] Added {len(embeddings)} vectors. Total: {self.index.ntotal}")
 
     def search(self, query_embedding: np.ndarray, k: int = 5):
         """
-        Search for the k most similar vectors.
-
-        Args:
-            query_embedding: Shape (1, 384), float32, normalized.
-            k:               Number of results to return.
-
-        Returns:
-            indices: list of int positions in the chunk list
-            scores:  list of float similarity scores (higher = more relevant)
+        Returns (indices, scores) — higher score = more relevant.
         """
         if self.index.ntotal == 0:
-            logger.warning("[VectorStore] Index is empty. Nothing to search.")
             return [], []
-
         if k <= 0:
             return [], []
 
-        query_embedding = np.asarray(query_embedding).astype("float32", copy=False)
-        if query_embedding.ndim == 1:
-            query_embedding = query_embedding.reshape(1, -1)
+        q = np.asarray(query_embedding, dtype="float32")
+        if q.ndim == 1:
+            q = q.reshape(1, -1)
+        if q.shape[1] != self.dimension:
+            raise ValueError(f"Query dimension mismatch: expected {self.dimension}, got {q.shape[1]}")
 
-        if query_embedding.shape[1] != self.dimension:
-            raise ValueError(
-                f"Query embedding dimension mismatch: expected {self.dimension}, got {query_embedding.shape[1]}"
-            )
-
-        # Defensive normalization: with IndexFlatIP this makes scores cosine similarities.
-        query_embedding = _l2_normalize(query_embedding)
-
+        q = _l2_normalize(q)
         k = min(int(k), self.index.ntotal)
-        scores, indices = self.index.search(query_embedding, k)
-
-        # FAISS can technically return -1 indices in some edge cases.
-        indices_list = indices[0].tolist()
-        scores_list = scores[0].tolist()
-        return indices_list, scores_list
-
-    def scores_and_indices(self, query_embedding: np.ndarray, k: int = 5):
-        """
-        Backwards-compatible helper: returns (indices, scores).
-        """
-        indices, scores = self.search(query_embedding, k=k)
-        return indices, scores
-
-    def add_embeddings(self, embeddings: np.ndarray):
-        """
-        Backwards-compatible alias for older scripts.
-        """
-        return self.add(embeddings)
+        scores, indices = self.index.search(q, k)
+        return indices[0].tolist(), scores[0].tolist()
 
     def save(self):
-        """Persist the current index to disk."""
         faiss.write_index(self.index, self.index_path)
-        logger.info(f"[VectorStore] Saved index to {self.index_path}")
+        logger.info(f"[VectorStore] Saved to {self.index_path}")
 
     def rebuild_from_embeddings(self, embeddings: np.ndarray):
-        """
-        Replace the current FAISS index with embeddings (rebuild from scratch).
-        """
-        embeddings = np.asarray(embeddings)
-        if embeddings is None or len(embeddings) == 0:
-            raise ValueError("Cannot rebuild FAISS index with empty embeddings.")
-
-        embeddings = embeddings.astype("float32", copy=False)
-        if embeddings.ndim != 2:
-            raise ValueError(f"Expected embeddings with shape (n, d), got {embeddings.shape}")
-
+        embeddings = np.asarray(embeddings, dtype="float32")
+        if len(embeddings) == 0:
+            raise ValueError("Cannot rebuild with empty embeddings.")
         embeddings = _l2_normalize(embeddings)
-
         self.dimension = int(embeddings.shape[1])
         self.index = faiss.IndexFlatIP(self.dimension)
         self.index.add(embeddings)
-        logger.info(f"[VectorStore] Rebuilt index with {self.index.ntotal} vectors.")
+        logger.info(f"[VectorStore] Rebuilt with {self.index.ntotal} vectors.")
         self.save()
+
+    # Backward-compat aliases
+    def add_embeddings(self, embeddings):
+        return self.add(embeddings)
+
+    def scores_and_indices(self, query_embedding, k=5):
+        return self.search(query_embedding, k=k)
 
     @property
     def total_vectors(self) -> int:
