@@ -9,4 +9,4 @@ data/vector_db/
 data/processed_chunks/
 .DS_Store
 Thumbs.db
-
+.env
