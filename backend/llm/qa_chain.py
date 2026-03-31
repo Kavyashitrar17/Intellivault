@@ -1,28 +1,3 @@
-"""
-qa_chain.py
------------
-Answer generation with a REAL LLM (Flan-T5) + extractive fallback.
-
-BIGGEST UPGRADE IN THE PROJECT:
-  The original used pure keyword scoring to pick sentences. That's not
-  actually a language model — it's a search algorithm. This version uses
-  google/flan-t5-base, a free, CPU-friendly seq2seq model (~250 MB) that:
-    - Understands natural language questions
-    - Can paraphrase and synthesise answers (not just copy sentences)
-    - Runs on CPU in ~1–2 seconds per query
-    - Requires NO API key
-
-  If you later want GPT-4 quality, set LLM_PROVIDER=openai in .env
-  and add your OPENAI_API_KEY. The same interface works for both.
-
-PIPELINE:
-  1. Build a context string from the top retrieved chunks
-  2. Format a QA prompt: "Context: ... Question: ... Answer:"
-  3. Run through Flan-T5 (or OpenAI if configured)
-  4. If LLM returns an empty/unusable answer, fall back to extractive QA
-
-Install:  pip install transformers accelerate sentencepiece
-"""
 
 import re
 import logging
@@ -32,269 +7,410 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+MAX_CONTEXT_CHARS  = 1800
+MAX_CONTEXT_CHUNKS = 3
+MAX_ANSWER_CHARS   = 600
+MIN_ANSWER_LENGTH  = 10
+
+_NOT_FOUND_PHRASES = [
+    "not found in", "not mentioned", "no information",
+    "cannot find", "does not contain", "not provided",
+    "not available", "no relevant", "i don't know",
+    "i do not know", "unable to find", "not_in_context",
+    "not_found",
+]
+
+_PREAMBLE_PATTERNS = [
+    r"^based on (the )?(provided )?(context|document[s]?)[,.]?\s*",
+    r"^according to (the )?(provided )?(context|document[s]?)[,.]?\s*",
+    r"^from (the )?(provided )?(context|document[s]?)[,.]?\s*",
+    r"^the (context|document[s]?) (state[s]?|mention[s]?|indicate[s]?)[,.]?\s*",
+    r"^(here is|here are) (a )?(summary|the answer)[:.]\s*",
+    r"^(sure[,!]?|certainly[,!]?|of course[,!]?|great[,!]?|absolutely[,!]?)\s*",
+]
+
 # -------------------------------------------------------
-# LLM singleton (lazy)
+# Groq availability check at import time
 # -------------------------------------------------------
-_llm_pipeline = None
+try:
+    from groq import Groq as _GroqClient
+    _GROQ_AVAILABLE = True
+    logger.info("[QA] ✅ groq package available.")
+except ImportError:
+    _GroqClient = None
+    _GROQ_AVAILABLE = False
+    logger.error("[QA] ❌ groq package NOT installed. Run: pip install groq")
+
+# Flan-T5 singleton (lazy)
+_flan_pipeline = None
 
 
-def _get_llm():
-    """Load Flan-T5 pipeline once, reuse forever."""
-    global _llm_pipeline
-    if _llm_pipeline is not None:
-        return _llm_pipeline
-
-    if settings.LLM_PROVIDER == "openai":
-        return None  # OpenAI path doesn't need a local pipeline
-
-    if settings.LLM_PROVIDER == "groq":
-        return None  # Groq path doesn't need a local pipeline
-
-    # Default: flan-t5-base
+def _get_flan():
+    global _flan_pipeline
+    if _flan_pipeline is not None:
+        return _flan_pipeline
     try:
         from transformers import pipeline
-        logger.info(f"[QA] Loading '{settings.FLAN_MODEL_NAME}' (first run may download ~250 MB)...")
-        _llm_pipeline = pipeline(
+        logger.info("[QA] Loading Flan-T5...")
+        _flan_pipeline = pipeline(
             "text2text-generation",
             model=settings.FLAN_MODEL_NAME,
             max_new_tokens=200,
-            do_sample=False,       # deterministic
+            do_sample=False,
         )
-        logger.info("[QA] Flan-T5 model ready.")
-    except ImportError:
-        logger.warning(
-            "[QA] transformers not installed — falling back to extractive QA. "
-            "Run: pip install transformers sentencepiece"
-        )
-        _llm_pipeline = "extractive"
+        logger.info("[QA] Flan-T5 ready.")
     except Exception as e:
-        logger.error(f"[QA] Failed to load Flan-T5: {e} — using extractive fallback.")
-        _llm_pipeline = "extractive"
-
-    return _llm_pipeline
+        logger.warning(f"[QA] Flan-T5 unavailable: {e}")
+        _flan_pipeline = "unavailable"
+    return _flan_pipeline
 
 
 # -------------------------------------------------------
-# Public interface
+# Chunk text cleaning
+# -------------------------------------------------------
+
+def _clean_chunk_text(text: str) -> str:
+    """
+    Strip document title lines, page headers, and numbered section headers
+    before sending chunk text to the LLM or building source previews.
+
+    Example — BEFORE:
+        "IntelliVault Model Training Notes 1. Overview IntelliVault is..."
+    AFTER:
+        "IntelliVault is a secure document intelligence system that uses..."
+    """
+    lines   = text.splitlines()
+    cleaned = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            if cleaned:        # keep internal blank lines, drop leading ones
+                cleaned.append("")
+            continue
+        # Short title-case line with no sentence-ending punctuation → header
+        is_short_title  = len(s) < 70 and s.istitle() and not s.endswith(".")
+        # "1. Overview" / "2. Data Collection"
+        is_numbered_hdr = bool(re.match(r"^\d+\.\s+[A-Z][a-zA-Z ]{2,30}$", s))
+        # Known boilerplate patterns
+        is_boilerplate  = any(kw in s.lower() for kw in [
+            "training notes", "table of contents", "model training notes",
+            "page ", "section ", "appendix",
+        ])
+        if is_short_title or is_numbered_hdr or is_boilerplate:
+            continue
+        cleaned.append(line)
+
+    result = "\n".join(cleaned).strip()
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
+
+
+# -------------------------------------------------------
+# Prompts
+# -------------------------------------------------------
+
+def _system_prompt() -> str:
+    return (
+        "You are a document Q&A assistant. "
+        "You answer questions STRICTLY using the provided context.\n\n"
+        "ABSOLUTE RULES — follow every one:\n"
+        "1. Use ONLY information from the context. "
+        "   Do NOT add external knowledge, facts, or definitions.\n"
+        "2. Do NOT copy sentences word-for-word from the context. "
+        "   Paraphrase and summarize.\n"
+        "3. Keep answers SHORT: max 3 sentences OR a bullet list of max 5 items.\n"
+        "4. When listing features, steps, or multiple items → use bullet points "
+        "   starting with '- ' on separate lines.\n"
+        "5. NEVER start with 'Based on', 'According to', 'The context says', "
+        "   or any similar preamble.\n"
+        "6. If the answer is not in the context → reply with exactly: NOT_FOUND\n"
+        "7. No filler, no padding, no markdown headers (#, ##).\n"
+        "8. No hallucination. If unsure → say NOT_FOUND."
+    )
+
+
+def _user_prompt(query: str, context: str) -> str:
+    return f"""
+CONTEXT (use only this):
+{context}
+
+QUESTION:
+{query}
+
+INSTRUCTIONS:
+- Answer ONLY from context
+- DO NOT copy sentences
+- Rewrite in your own words
+- Keep answer SHORT
+- Use bullet points ONLY
+- Max 3–4 bullets
+- Each bullet = one idea
+- NO paragraph
+- NO extra explanation
+- If not found → return: NOT_FOUND
+
+ANSWER:
+"""
+
+
+# -------------------------------------------------------
+# Main entry point
 # -------------------------------------------------------
 
 def generate_answer(query: str, chunks: List[Dict]) -> str:
-    """
-    Generate an answer for `query` using the top retrieved chunks.
-
-    Args:
-        query:  The user's question.
-        chunks: Ranked list of chunk dicts (from retriever.py).
-
-    Returns:
-        Answer string.
-    """
     if not chunks:
         return "No relevant content found. Please upload a document first."
 
-    provider = settings.LLM_PROVIDER
+    clean_chunks = _deduplicate_chunks(chunks[:MAX_CONTEXT_CHUNKS])
+    context = _build_context(clean_chunks, MAX_CONTEXT_CHARS)
 
-    if provider == "openai" and settings.OPENAI_API_KEY:
-        return _answer_openai(query, chunks)
+    print("\n" + "="*50)
+    print("🔥 USING GROQ ONLY")
+    print(f"Query: {query}")
+    print("="*50)
 
-    if provider == "groq" and settings.GROQ_API_KEY:
-        return _answer_groq(query, chunks)
+    if not (_GROQ_AVAILABLE and settings.GROQ_API_KEY):
+        raise RuntimeError("❌ GROQ NOT AVAILABLE OR API KEY MISSING")
 
-    # Default: Flan-T5 local model
-    pipeline_obj = _get_llm()
-    if pipeline_obj and pipeline_obj != "extractive":
-        answer = _answer_flan(query, chunks, pipeline_obj)
-        if answer and len(answer.strip()) > 5:
-            return answer.strip()
-        logger.info("[QA] Flan-T5 returned empty answer — using extractive fallback.")
+    answer = _answer_groq(query, context)
 
-    # Final fallback: improved extractive QA
-    return _extractive_answer(query, chunks)
+    if not answer or _is_empty_or_not_found(answer):
+        raise RuntimeError("❌ GROQ FAILED OR RETURNED EMPTY")
 
-
+    return _clean_output(answer)
 # -------------------------------------------------------
 # LLM backends
 # -------------------------------------------------------
 
-def _build_context(chunks: List[Dict], max_chars: int = 1500) -> str:
-    """Concatenate top chunks into a context string (truncated to fit model)."""
-    context_parts = []
-    total = 0
-    for chunk in chunks:
-        text = chunk.get("text", "").strip()
-        if total + len(text) > max_chars:
-            remaining = max_chars - total
-            if remaining > 100:
-                context_parts.append(text[:remaining])
-            break
-        context_parts.append(text)
-        total += len(text)
-    return "\n\n".join(context_parts)
+def _answer_groq(query: str, context: str) -> str:
+    print("🚀 Calling Groq API...")
 
+    client = _GroqClient(api_key=settings.GROQ_API_KEY.strip())
 
-def _answer_flan(query: str, chunks: List[Dict], pipeline_obj) -> str:
-    """Use Flan-T5 for answer generation."""
-    context = _build_context(chunks, max_chars=1200)
-    prompt = (
-        f"Answer the question based only on the context below. "
-        f"If the answer is not in the context, say 'Not found in documents'.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question: {query}\n\n"
-        f"Answer:"
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # ✅ FIXED
+            messages=[
+                {"role": "system", "content": _system_prompt()},
+                {"role": "user", "content": _user_prompt(query, context)},
+            ],
+            max_tokens=300,
+            temperature=0.0,
+        )
+
+        answer = response.choices[0].message.content.strip()
+        print("✅ Groq response received")
+
+        return answer
+
+    except Exception as e:
+        print("❌ GROQ ERROR:", str(e))
+        raise RuntimeError("Groq API failed")
+
+def _answer_openai(query: str, context: str) -> str:
+    """Call OpenAI. Raises on ANY error — caller handles it."""
+    from openai import OpenAI
+    client = OpenAI(api_key=settings.OPENAI_API_KEY.strip())
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": _system_prompt()},
+            {"role": "user",   "content": _user_prompt(query, context)},
+        ],
+        max_tokens=300,
+        temperature=0.0,
     )
-    try:
-        result = pipeline_obj(prompt, max_new_tokens=150, do_sample=False)
-        return result[0]["generated_text"].strip()
-    except Exception as e:
-        logger.error(f"[QA] Flan-T5 inference failed: {e}")
-        return ""
+    return response.choices[0].message.content.strip()
 
 
-def _answer_openai(query: str, chunks: List[Dict]) -> str:
-    """Use OpenAI API for answer generation."""
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        context = _build_context(chunks, max_chars=3000)
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a document Q&A assistant. Answer only from the "
-                        "provided context. If the answer is not there, say so."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nQuestion: {query}",
-                },
-            ],
-            max_tokens=300,
-            temperature=0,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"[QA] OpenAI call failed: {e}")
-        return _extractive_answer(query, chunks)
-
-
-def _answer_groq(query: str, chunks: List[Dict]) -> str:
-    """Use Groq API (free tier) for fast LLM answers."""
-    try:
-        from groq import Groq
-        client = Groq(api_key=settings.GROQ_API_KEY)
-        context = _build_context(chunks, max_chars=3000)
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a document Q&A assistant. Answer only from the "
-                        "provided context. If the answer is not there, say so."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nQuestion: {query}",
-                },
-            ],
-            max_tokens=300,
-            temperature=0,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"[QA] Groq call failed: {e}")
-        return _extractive_answer(query, chunks)
+def _answer_flan(query: str, context: str, pipeline_obj) -> str:
+    """Flan-T5 local inference. Raises on error — caller handles it."""
+    prompt = (
+        "Summarize the answer to the question in 2 sentences "
+        "using ONLY the context. Do not copy text. Do not add outside knowledge.\n\n"
+        f"Context: {context[:800]}\n\n"
+        f"Question: {query}\n\nAnswer:"
+    )
+    result = pipeline_obj(prompt, max_new_tokens=150, do_sample=False)
+    return result[0]["generated_text"].strip()
 
 
 # -------------------------------------------------------
-# Extractive fallback (improved version of original)
+# Context building
+# -------------------------------------------------------
+
+def _deduplicate_chunks(chunks: List[Dict]) -> List[Dict]:
+    selected, sigs = [], []
+    for chunk in chunks:
+        text = chunk.get("text", "").strip()
+        if not text:
+            continue
+        sig = _ngram_sig(text)
+        if any(_jaccard(sig, s) > 0.6 for s in sigs):
+            logger.debug(f"[QA] Deduped chunk: {text[:50]}")
+            continue
+        selected.append(chunk)
+        sigs.append(sig)
+    logger.info(f"[QA] {len(selected)}/{len(chunks)} chunks after dedup.")
+    return selected
+
+
+def _build_context(chunks: List[Dict], max_chars: int) -> str:
+    """
+    Build numbered context with cleaned text.
+    Sections separated by --- so LLM can distinguish chunk boundaries.
+    """
+    parts, total = [], 0
+    for i, chunk in enumerate(chunks, 1):
+        raw  = chunk.get("text", "").strip()
+        text = _clean_chunk_text(raw)
+        if not text:
+            text = raw
+        entry = f"[Source {i}]\n{text}"
+        if total + len(entry) > max_chars:
+            rem = max_chars - total
+            if rem > 80:
+                parts.append(entry[:rem].rstrip() + "...")
+            break
+        parts.append(entry)
+        total += len(entry) + 2
+    return "\n\n---\n\n".join(parts)
+
+
+def _ngram_sig(text: str, n: int = 5) -> set:
+    t = re.sub(r"\s+", " ", text.lower().strip())
+    return {t[i:i+n] for i in range(len(t) - n + 1)}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+# -------------------------------------------------------
+# Output cleaning  (FIX: converts \n → real newlines)
+# -------------------------------------------------------
+
+def _clean_output(text: str) -> str:
+    text = text.replace("\\n", "\n").strip()
+
+    # If not bullet → convert
+    if "-" not in text:
+        sentences = re.split(r"[.]", text)
+        bullets = [f"- {s.strip()}" for s in sentences if s.strip()]
+        text = "\n".join(bullets[:4])
+
+    # remove duplicates
+    seen = set()
+    final = []
+    for line in text.splitlines():
+        key = line.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            final.append(line)
+
+    return "\n".join(final[:4])
+
+
+def _is_empty_or_not_found(text: str) -> bool:
+    if not text or len(text.strip()) < MIN_ANSWER_LENGTH:
+        return True
+    lower = text.lower()
+    return any(p in lower for p in _NOT_FOUND_PHRASES)
+
+
+# -------------------------------------------------------
+# Extractive fallback
 # -------------------------------------------------------
 
 _STOPWORDS = {
-    "a","an","and","are","as","at","be","been","being","but","by","can","could",
-    "did","do","does","doing","for","from","had","has","have","having","how","i",
-    "if","in","into","is","it","its","may","might","more","most","must","no","not",
-    "of","on","or","our","out","should","so","such","than","that","the","their",
-    "then","there","these","they","this","those","to","was","we","were","what",
-    "when","where","which","who","will","with","would","you","your",
+    "a","an","and","are","as","at","be","been","but","by","can","did","do","does",
+    "for","from","had","has","have","how","i","if","in","into","is","it","its",
+    "may","no","not","of","on","or","our","out","should","so","than","that","the",
+    "their","then","there","these","they","this","those","to","was","we","were",
+    "what","when","where","which","who","will","with","you",
 }
 
-TOP_SENTENCES    = 2
-MIN_SENT_LENGTH  = 15
-MIN_SCORE_THRESHOLD = 0.45  # slightly lower than original's 0.55
+
+def _is_header_line(s: str) -> bool:
+    s = s.strip()
+    return (
+        len(s) < 70
+        and not s.endswith(".")
+        and (s.istitle() or bool(re.match(r"^\d+\.\s+[A-Z]", s)))
+    )
 
 
 def _extractive_answer(query: str, chunks: List[Dict]) -> str:
-    query_tokens  = set(_tokenize(query))
-    key_terms     = {t for t in query_tokens if len(t) >= 3 and t not in _STOPWORDS}
-    all_scored    = []
+    query_tokens = set(_tok(query))
+    key_terms    = {t for t in query_tokens if len(t) >= 3 and t not in _STOPWORDS}
+    scored       = []
 
     for rank, chunk in enumerate(chunks):
-        text = chunk.get("text", "")
-        if not text:
-            continue
-        sentences = _split_sentences(text)
-        for pos, sent in enumerate(sentences):
-            if len(sent) < MIN_SENT_LENGTH:
+        text  = _clean_chunk_text(chunk.get("text", ""))
+        sents = _split_sents(text)
+        for pos, sent in enumerate(sents):
+            if len(sent) < 20 or _is_header_line(sent):
                 continue
-            sent_tokens = set(_tokenize(sent))
-            if key_terms and not (sent_tokens & key_terms):
+            s_tok = set(_tok(sent))
+            if key_terms and not (s_tok & key_terms):
                 continue
-            score = _score(sent_tokens, query_tokens, key_terms, pos, len(sentences), rank)
-            all_scored.append((score, sent, rank, pos))
+            kw    = len(query_tokens & s_tok) / len(query_tokens) if query_tokens else 0
+            kr    = len(key_terms & s_tok)    / len(key_terms)    if key_terms   else 0
+            score = max(0.65 * kr + 0.35 * kw + 0.1 * (1 - pos / max(len(sents), 1)), 0.0)
+            scored.append((score, sent))
 
-    if not all_scored:
-        return "Answer not found in documents."
+    if not scored:
+        sents      = _split_sents(_clean_chunk_text(chunks[0].get("text","") if chunks else ""))
+        non_header = [s for s in sents if not _is_header_line(s) and len(s) > 20]
+        return " ".join(non_header[:2]) or "Answer not found in documents."
 
-    all_scored.sort(key=lambda x: x[0], reverse=True)
-    best_score = all_scored[0][0]
-
-    if best_score < MIN_SCORE_THRESHOLD:
-        return "Answer not found in documents."
-
-    selected, selected_texts = [], []
-    for score, sent, rank, pos in all_scored:
-        if len(selected) >= TOP_SENTENCES:
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected, seen_texts = [], []
+    for _, sent in scored:
+        if len(selected) >= 2:
             break
-        if not _is_near_duplicate(sent, selected_texts):
-            selected.append((sent, rank, pos))
-            selected_texts.append(sent)
+        if not _near_dup(sent, seen_texts):
+            selected.append(sent)
+            seen_texts.append(sent)
 
-    if not selected:
-        selected = [(all_scored[0][1], all_scored[0][2], all_scored[0][3])]
-
-    selected.sort(key=lambda x: (x[1], x[2]))
-    return " ".join(s for s, _, _ in selected).strip()
+    return " ".join(selected) or "Answer not found in documents."
 
 
-def _split_sentences(text: str) -> List[str]:
-    raw = re.split(r'(?<=[.!?])\s+|\n', text)
-    return [s.strip() for s in raw if s.strip()]
+def _split_sents(text: str) -> List[str]:
+    return [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n', text) if s.strip()]
 
 
-def _tokenize(text: str) -> List[str]:
+def _tok(text: str) -> List[str]:
     return re.findall(r"\b[a-z0-9]+\b", text.lower())
 
 
-def _score(sent_tokens, query_tokens, key_terms, pos, total, rank) -> float:
-    kw_score     = len(query_tokens & sent_tokens) / len(query_tokens) if query_tokens else 0
-    key_ratio    = len(key_terms & sent_tokens) / len(key_terms) if key_terms else 0
-    pos_bonus    = 0.2 * (1 - pos / total) if total else 0
-    word_count   = len(sent_tokens)
-    len_bonus    = 0.1 if 10 <= word_count <= 40 else (0.05 if word_count > 40 else 0)
-    rank_penalty = 0.05 * rank
-    return max(0.7 * key_ratio + 0.3 * kw_score + pos_bonus + len_bonus - rank_penalty, 0.0)
-
-
-def _is_near_duplicate(candidate: str, selected: List[str], threshold: float = 0.6) -> bool:
-    cand_tok = set(_tokenize(candidate))
-    for existing in selected:
-        ext_tok = set(_tokenize(existing))
-        union   = cand_tok | ext_tok
-        if union and len(cand_tok & ext_tok) / len(union) >= threshold:
+def _near_dup(candidate: str, selected: List[str], t: float = 0.55) -> bool:
+    c = set(_tok(candidate))
+    for s in selected:
+        sv = set(_tok(s))
+        u  = c | sv
+        if u and len(c & sv) / len(u) >= t:
             return True
     return False
+
+
+# -------------------------------------------------------
+# Confidence scorer
+# -------------------------------------------------------
+
+def score_confidence(top_chunks: List[Dict], answer: str) -> str:
+    if not top_chunks or not answer:
+        return "none"
+    if _is_empty_or_not_found(answer):
+        return "none"
+    top_score  = float(top_chunks[0].get("score", 0) or 0)
+    penalty    = (0.15 if top_chunks[0].get("fallback") else 0) + \
+                 (0.10 if len(answer) < 40 else 0)
+    effective  = top_score - penalty
+    if effective >= settings.CONFIDENCE_HIGH:
+        return "high"
+    if effective >= settings.CONFIDENCE_MEDIUM:
+        return "medium"
+    return "low"

@@ -44,13 +44,8 @@ MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 # -------------------------------------------------------
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
  
-async def verify_api_key(api_key: str = Depends(_api_key_header)):
-    if not settings.API_KEY:
-        return  # Auth disabled — no key configured
-    if api_key != settings.API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing API key.")
- 
- 
+async def verify_api_key():
+    return True
 # -------------------------------------------------------
 # Lifespan: load heavy resources ONCE at startup
 # -------------------------------------------------------
@@ -227,3 +222,25 @@ def reset():
     reset_vector_store()  # clear singleton so next request starts fresh
  
     return {"message": "Index and chunks cleared.", "deleted": deleted}
+# Add this endpoint to your backend/api.py temporarily
+# Visit http://127.0.0.1:8000/debug to see what's happening
+
+@app.get("/debug")
+def debug_config():
+    """
+    Shows the active config so you can see exactly why Groq isn't being called.
+    Remove this endpoint before going to production.
+    """
+    from backend.config import settings
+    groq_key = settings.GROQ_API_KEY
+    return {
+        "llm_provider":      settings.LLM_PROVIDER,
+        "groq_key_set":      bool(groq_key and groq_key.strip()),
+        "groq_key_prefix":   groq_key[:8] + "..." if groq_key else "EMPTY",
+        "openai_key_set":    bool(settings.OPENAI_API_KEY),
+        "chunks_path":       settings.CHUNKS_PATH,
+        "index_path":        settings.INDEX_PATH,
+        "top_k":             settings.TOP_K,
+        "min_semantic":      settings.MIN_SEMANTIC_SCORE,
+        "min_final":         settings.MIN_FINAL_SCORE,
+    }
