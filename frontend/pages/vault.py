@@ -69,7 +69,6 @@ def _render_message(role: str, content: Dict):
         st.markdown(
             f'<div class="chat-row user-row">'
             f'<div class="bubble user-bubble"><p>{content["text"]}</p></div>'
-            f'<div class="avatar user-avatar">You</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -83,7 +82,6 @@ def _render_message(role: str, content: Dict):
 
     st.markdown(
         f'<div class="chat-row assistant-row">'
-        f'<div class="avatar assistant-avatar">IV</div>'
         f'<div class="bubble assistant-bubble">'
         f'<div class="answer-body">{answer_html}</div>'
         f'<div class="answer-meta">'

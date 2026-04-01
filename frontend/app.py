@@ -6,34 +6,30 @@ Renders the sidebar navigation and routes to pages.
 """
 
 import streamlit as st
-
-st.set_page_config(
-    page_title="IntelliVault",
-    page_icon="🔒",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 # ── Load global CSS ──────────────────────────────────────
 def _load_css():
     import os
     css_path = os.path.join(os.path.dirname(__file__), "style.css")
     if os.path.exists(css_path):
-        with open("style.css", encoding="utf-8") as f:
+        with open(css_path) as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 _load_css()
 
 # ── Sidebar ──────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("""
-    <div class="sidebar-brand">
-        <span class="brand-icon">🔒</span>
-        <span class="brand-name">IntelliVault</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("<div class='sidebar-divider'></div>", unsafe_allow_html=True)
+    st.sidebar.markdown("""
+<div style="
+    font-size: 30px;
+    font-weight: 800;
+    background: linear-gradient(90deg, #7c3aed, #06b6d4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 20px;
+">
+🔒 IntelliVault
+</div>
+""", unsafe_allow_html=True)
 
     page = st.radio(
         "Navigation",

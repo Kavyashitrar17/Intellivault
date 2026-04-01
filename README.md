@@ -2,79 +2,109 @@
 
 ## Project Overview
 
-IntelliVault is a Personal Knowledge Vault that enables users to store and query their own documents using semantic search and intelligent recall. Instead of relying on keyword-based search, the system allows users to ask natural language questions and receive context-aware answers grounded strictly in their uploaded documents.
+**IntelliVault** is an AI-powered Personal Knowledge Vault that enables users to store, search, and retrieve information from their own documents using **semantic search** and **Retrieval-Augmented Generation (RAG)**.
 
-The system is built using a Retrieval-Augmented Generation (RAG) approach, where relevant document content is retrieved first and then used to generate accurate and meaningful answers.
+Unlike traditional keyword-based systems, IntelliVault understands the *context and meaning* of queries, allowing users to ask natural language questions and receive **accurate, context-aware answers grounded strictly in their data**.
 
 ---
 
 ## Problem Statement
 
-Students and professionals store large amounts of information in digital documents such as PDFs and notes. Over time, recalling specific information becomes difficult due to inefficient keyword-based search and lack of contextual understanding.
+Students and professionals accumulate large volumes of unstructured data (PDFs, notes, documents). Traditional search systems fail because:
 
-This project addresses this problem by enabling semantic retrieval from personal documents, allowing users to query their knowledge base effectively.
+* They rely on exact keyword matches
+* They lack contextual understanding
+* They cannot generate precise answers
 
----
-
-## Solution Approach
-
-The system follows a Retrieval-Augmented Generation (RAG) architecture:
-
-* Users upload documents (PDF or TXT)
-* Documents are processed and split into smaller overlapping chunks
-* Each chunk is converted into vector embeddings using a transformer model
-* Embeddings are stored in a FAISS vector database
-
-When a user submits a query:
-
-* The query is converted into an embedding
-* The system retrieves the most relevant chunks using semantic similarity
-* A context-based answer is generated from the retrieved content
-
-This ensures answers are grounded in the uploaded documents, reducing hallucination and improving reliability.
+Result: **Time-consuming manual searching and poor knowledge recall**
 
 ---
 
-## Key Features
+## Solution
 
-* Support for PDF and TXT document upload
-* Automatic text extraction and preprocessing
-* Configurable chunking with overlap
-* Embedding generation using Sentence Transformers
-* Vector storage and similarity search using FAISS
-* Semantic retrieval based on meaning rather than keywords
-* Context-aware answer generation
-* Source-based answer transparency
-* REST API using FastAPI
-* Interactive frontend using Streamlit
+IntelliVault solves this using a **RAG-based architecture**, which combines:
+
+* Semantic Retrieval (FAISS + embeddings)
+* Context-aware Answer Generation
+
+This ensures:
+
+* Accurate answers
+* Reduced hallucination
+* Answers strictly grounded in user documents
 
 ---
 
 ## System Architecture
 
-User
-→ Frontend (Streamlit)
-→ Backend (FastAPI)
-→ Document Processing (Chunking & Embeddings)
-→ Vector Database (FAISS)
-→ Semantic Retrieval
-→ Answer Generation
-→ Response with Sources
+```
+User Query
+   ↓
+Streamlit Frontend
+   ↓
+FastAPI Backend
+   ↓
+RAG Pipeline
+   ├── Document Processing (Chunking)
+   ├── Embedding Generation
+   ├── Vector Storage (FAISS)
+   ├── Semantic Retrieval
+   └── Answer Generation
+   ↓
+Response + Source Context
+```
+
+---
+
+## How It Works
+
+### Document Ingestion
+
+* Upload PDF/TXT files
+* Extract text using PyMuPDF / PyPDF
+* Split into **overlapping chunks**
+* Convert chunks → embeddings
+* Store in **FAISS vector database**
+
+### Query Processing
+
+* Convert user query → embedding
+* Perform **semantic similarity search**
+* Retrieve top relevant chunks
+
+### Answer Generation
+
+* Extract relevant context
+* Generate concise answer
+* Return answer + source references
+
+---
+
+## Key Features
+
+* PDF & TXT document support
+* Intelligent chunking with overlap
+* Semantic search (not keyword-based)
+* Fast retrieval using FAISS
+* Context-aware answer generation
+* Source-backed responses (transparency)
+* REST API with FastAPI
+* Interactive UI using Streamlit
 
 ---
 
 ## Tech Stack
 
-| Layer               | Technology                               |
-| ------------------- | ---------------------------------------- |
-| Language            | Python                                   |
-| Backend             | FastAPI                                  |
-| Frontend            | Streamlit                                |
-| Embeddings          | Sentence Transformers (all-MiniLM-L6-v2) |
-| Vector Database     | FAISS                                    |
-| Document Processing | PyMuPDF / PyPDF                          |
-| LLM / QA Logic      | Local extractive QA + optional LLM       |
-| Version Control     | Git & GitHub                             |
+| Layer            | Technology                               |
+| ---------------- | ---------------------------------------- |
+| Language         | Python                                   |
+| Backend          | FastAPI                                  |
+| Frontend         | Streamlit                                |
+| Embeddings       | Sentence Transformers (all-MiniLM-L6-v2) |
+| Vector Database  | FAISS                                    |
+| Document Parsing | PyMuPDF / PyPDF                          |
+| AI Pipeline      | RAG (Retrieval-Augmented Generation)     |
+| Version Control  | Git & GitHub                             |
 
 ---
 
@@ -83,19 +113,19 @@ User
 ```
 IntelliVault/
 ├── backend/
-│   ├── ingestion/        # Document loading, chunking, embeddings
-│   ├── retrieval/        # FAISS and search logic
-│   ├── llm/              # Answer generation logic
+│   ├── ingestion/        # Document processing & embeddings
+│   ├── retrieval/        # FAISS search logic
+│   ├── llm/              # Answer generation
 │   ├── api.py            # FastAPI endpoints
-│   ├── rag_pipeline.py   # End-to-end RAG pipeline
+│   ├── rag_pipeline.py   # Core pipeline
 │
 ├── frontend/
 │   ├── app.py            # Streamlit UI
 │
 ├── data/
-│   ├── uploads/          # Uploaded files
-│   ├── processed_chunks/ # Stored chunk data
-│   ├── vector_db/        # FAISS index
+│   ├── uploads/          
+│   ├── processed_chunks/ 
+│   ├── vector_db/        
 │
 ├── requirements.txt
 ├── README.md
@@ -104,50 +134,83 @@ IntelliVault/
 
 ---
 
-## How It Works
+## Improvements & Optimizations
 
-1. A user uploads a document through the frontend
-2. The backend extracts text and splits it into chunks with overlap
-3. Each chunk is converted into embeddings using a transformer model
-4. Embeddings are stored in a FAISS vector database
-
-When a query is asked:
-
-* The query is converted into an embedding
-* The system retrieves the most relevant chunks using similarity search
-* Relevant sentences are selected and combined to generate a concise answer
-
-The system returns the answer along with the source chunks.
+* Fixed embedding normalization issues → better accuracy
+* Improved FAISS indexing consistency
+* Enhanced retrieval ranking
+* Reduced repetition in generated answers
+* Added API error handling & stability improvements
 
 ---
 
-## Improvements Implemented
+## Future Enhancements
 
-* Fixed embedding and query normalization for better retrieval accuracy
-* Improved FAISS indexing and consistency between chunks and vectors
-* Enhanced retrieval ranking to return more relevant context
-* Refined answer generation to reduce repetition and improve clarity
-* Added error handling and stability improvements in API
-* Ensured consistent backend module imports
-
----
-
-## Future Improvements
-
-* Integration of advanced LLMs for generative answers
-* Hybrid search combining keyword and semantic retrieval
-* Multi-document querying and filtering
-* Improved UI/UX and performance optimization
+* Integration with advanced LLMs (GPT / open-source models)
+* Hybrid search (keyword + semantic)
+* Multi-document querying
+* Real-time document updates
+* UI/UX enhancements
 
 ---
 
-## Team Roles
+## Getting Started
 
-Backend & AI Logic:
-Document processing, embeddings, vector database, retrieval, RAG pipeline
+### 1. Clone the Repository
 
-Frontend & Documentation:
-Streamlit UI, API integration, report preparation, demonstration
+```bash
+git clone https://github.com/your-username/intellivault.git
+cd intellivault
+```
+
+### 2. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Run Backend
+
+```bash
+uvicorn backend.api:app --reload
+```
+
+### 4. Run Frontend
+
+```bash
+streamlit run frontend/app.py
+```
+
+---
+
+## 📡 API Overview
+
+| Endpoint  | Description      |
+| --------- | ---------------- |
+| `/upload` | Upload documents |
+| `/query`  | Ask questions    |
+| `/health` | Check API status |
+
+---
+
+## Use Cases
+
+* Student notes search
+* Research paper analysis
+* Personal knowledge management
+* Document Q&A system
+
+---
+
+## Team
+
+**Backend & AI:**
+
+* RAG pipeline, embeddings, FAISS, API
+
+**Frontend & Documentation:**
+
+* UI development, integration, reporting
 
 ---
 
@@ -158,15 +221,8 @@ Streamlit UI, API integration, report preparation, demonstration
 
 ---
 
+## Key Highlight
 
+> IntelliVault transforms static documents into an **intelligent, searchable knowledge system**, enabling users to interact with their data conversationally.
 
-
-
-
-
-
-
-
-
-
-
+---
