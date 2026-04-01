@@ -100,7 +100,7 @@ Response + Source Context
 | Language         | Python                                   |
 | Backend          | FastAPI                                  |
 | Frontend         | Streamlit                                |
-| Embeddings       | Sentence Transformers (all-MiniLM-L6-v2) |
+| Embeddings       | llama-3.1-8b-instant                     |
 | Vector Database  | FAISS                                    |
 | Document Parsing | PyMuPDF / PyPDF                          |
 | AI Pipeline      | RAG (Retrieval-Augmented Generation)     |
